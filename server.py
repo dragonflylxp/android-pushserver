@@ -7,6 +7,7 @@
 import tornado.tcpserver 
 import tornado.ioloop
 import tornado.gen
+import tornado.websocket
 import tornadoredis
 import time
 import json
@@ -41,7 +42,7 @@ def update_connections():
         if c['t'] < now-CALLBACK_PERIOD:
             #超时关闭连接
             del g_c2p[c['c']]
-            g_p2c[p]['c']._stream.close()
+            g_p2c[p]['c'].close()
             del g_p2c[p]
 
 
@@ -62,8 +63,12 @@ def sub_callback(msg):
 
     p = msg.body
     if g_p2c.has_key(p):
+        #当客户端消息可用时主动推送
         key = 'android_push_' + p.lower()
         g_redis_blpop.blpop((key,), TIMEOUT, blpop_callback)
+    else:
+        #连接不可用时，被动拉取
+        pass
 
 
 """消息发送回调
@@ -74,10 +79,27 @@ def blpop_callback(msg):
         try:
             dct   = json.loads(msg)
             token = dct.get('token', None)
-            resp  = ''.join([msg, '\n'])
             if token and g_p2c.has_key(token):
-                tornado.ioloop.IOLoop.instance().add_callback(lambda: g_p2c[token]['c'].write_handler(resp))
+                #兼容被动拉取消息格式
+                resp = {}
+                data = {}
+                expire = dct.get('etc',{}).get('expire',0)
+                if expire >= time.time(): 
+                    data['msg'] = dct.get('data',{})
+                else:
+                    data['msg'] = {}
+                data['interval'] = 350
+                resp['data'] = data
+                resp['code'] = '1'
+
+                #发送msg
+                try:
+                    tornado.ioloop.IOLoop.instance().add_callback(lambda: \
+                        g_p2c[token]['c'].write_message(json.dumps(resp,ensure_ascii=False)))
+                except Exception as e:
+                    print 'Connection already closed!:%s' % e
             else:
+                #token不合法或客户端未连接，直接丢弃msg
                 print 'unreachable token:[ TOKEN:%s ]' % token
         except Exception as e:
             print 'push msg err![ MSG:%s ERR:%s]' % (msg,e)
@@ -106,10 +128,8 @@ class Connection(object):
             resp = 'ACK\n'
         else:
             #心跳包:''
-            #resp = data 
             g_p2c[g_c2p[self]]['t'] = time.time()
             resp = 'PING\n' 
-
 
         self.write_handler(resp)
         self.read_handler()
@@ -126,11 +146,38 @@ class PushServer(tornado.tcpserver.TCPServer):
     def handle_stream(self, stream, address):
         Connection(stream, address)
 
+class MainHandler(tornado.websocket.WebSocketHandler):
+    def open(self):
+        print "A new client has connected!"
+
+    def on_close(self):
+        print "A connection has broken!"
+
+    def on_message(self, message):
+        req  = message
+        if len(req) > 0:
+            #首次通信:pushkey
+            print 'First tcp pack: [ PUSHKEY:%s ]' % req
+            g_p2c.update({req:{'c':self, 't':time.time()}})
+            g_c2p.update({self:req})
+            try:
+                self.write_message('ACK')
+            except Exception as e:
+                print 'Connection already closed!:%s' % e
+        else:
+            #心跳包:'', 不响应心跳包节约流量
+            print 'Heart beat to keepalive: [ PING:%s ]' % req
+            g_p2c[g_c2p[self]]['t'] = time.time()
+
 if __name__ == '__main__':
+    """
     #启动tcp-server
     server = PushServer()
     server.bind(8774)
     server.start() # 0:Forks multiple sub-processes
+    """
+    application = tornado.web.Application([(r'/websocket',MainHandler),])
+    application.listen(8774)
 
     #redis-subscribe
     g_redis_sub = tornadoredis.Client(host=HOST, port=PORT, selected_db=DB,
