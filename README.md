@@ -1,4 +1,6 @@
-android-pushserver
+## android-pushserver: android消息推送服务
 ==================
 
-android的消息推送服务，维护与客户端的长连接，主动推送消息。
+* 服务基于[tornado](http://www.tornadoweb.org/en/stable/)异步框架
+* 用户设备通过websocket与推送服务保持长连接(心跳检测、僵尸连接处理)
+* 基于[tornadoredis](https://github.com/leporo/tornado-redis/),服务订阅redis消息触发推送给用户
